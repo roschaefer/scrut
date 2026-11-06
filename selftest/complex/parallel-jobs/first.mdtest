@@ -1,0 +1,8 @@
+# Waits for the signal of the second document
+
+`wait_for_signal` comes from `test-parallel-jobs.md`.
+
+```scrut
+$ wait_for_signal
+from the second document
+```

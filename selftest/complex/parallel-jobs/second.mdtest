@@ -1,0 +1,7 @@
+# Sends the signal the first document waits for
+
+`send_signal` comes from `test-parallel-jobs.md`.
+
+```scrut
+$ send_signal
+```

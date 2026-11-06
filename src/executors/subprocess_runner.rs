@@ -17,6 +17,7 @@ use anyhow::Context;
 use anyhow::Result;
 use subprocess::Exec;
 use subprocess::ExitStatus;
+use subprocess::Job;
 use subprocess::Redirection;
 use tempfile::tempfile_in;
 use tracing::debug;
@@ -87,7 +88,7 @@ impl Runner for SubprocessRunner {
         }
 
         let started = Instant::now();
-        let mut process = exec.detached().start().context("start process")?;
+        let mut process = start(exec.detached()).context("start process")?;
         let span = debug_span!("process", pid = ?process.pid());
         let _s = span.enter();
         trace!(testcase = %&testcase, "running testcase in subprocess");
@@ -167,6 +168,33 @@ impl Runner for SubprocessRunner {
             validation_result: None,
         })
     }
+}
+
+/// Starts the process of `exec`. On some platforms, a process another thread
+/// starts at the same time (see `--jobs`) can inherit this process's pipes,
+/// and keep its STDIN open:
+///
+/// - Where there is no `pipe2()`, subprocess creates its pipes with `pipe()`
+///   and marks them close-on-exec only afterwards.
+/// - On Windows, subprocess marks the child's ends of the pipes inheritable
+///   before `CreateProcess()`, which hands every inheritable handle to the
+///   new process.
+///
+/// Starting one process at a time there closes that gap.
+fn start(exec: Exec) -> std::io::Result<Job> {
+    #[cfg(any(
+        target_os = "aix",
+        target_vendor = "apple",
+        target_os = "haiku",
+        windows
+    ))]
+    let _one_at_a_time = {
+        static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        STARTING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    exec.start()
 }
 
 impl Default for SubprocessRunner {
