@@ -6,6 +6,7 @@
  */
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -47,6 +48,7 @@ use tracing::trace;
 use super::root::GlobalSharedParameters;
 use super::root::ScrutRenderer;
 use crate::utils::FileParser;
+use crate::utils::ParsedTestFile;
 use crate::utils::ProgressWriter;
 use crate::utils::TestEnvironment;
 use crate::utils::canonical_shell;
@@ -54,6 +56,7 @@ use crate::utils::debug_testcases;
 use crate::utils::get_log_level;
 use crate::utils::kill_detached_process;
 use crate::utils::make_executor;
+use crate::utils::run_in_parallel;
 
 #[derive(Debug, thiserror::Error)]
 #[error("validation failed")]
@@ -121,12 +124,25 @@ pub struct Args {
     #[clap(long)]
     verbose: bool,
 
+    /// Number of test documents to run at the same time. The results are
+    /// rendered in the order of the documents, whatever order they finish in.
+    #[clap(long, short = 'j', default_value = "1")]
+    jobs: NonZeroUsize,
+
     #[clap(flatten)]
     global: GlobalSharedParameters,
 }
 
 impl Args {
     pub(crate) fn run(&self) -> Result<()> {
+        // documents running at the same time would share a user provided
+        // work directory
+        if self.jobs.get() > 1 && self.global.work_directory.is_some() {
+            bail!(
+                "--work-directory can't be combined with running documents in parallel (--jobs 2 or more)"
+            );
+        }
+
         // init parser and determine suffices to look for
         let markdown_languages = &self
             .markdown_languages
@@ -166,7 +182,8 @@ impl Args {
             style(tests.len()).bold()
         ));
 
-        for mut test in tests {
+        let run_document = |mut test: ParsedTestFile| -> Result<DocumentRun> {
+            let mut run = DocumentRun::default();
             pw.inc(1);
             pw.set_message(format!(
                 "👀 {}",
@@ -275,16 +292,17 @@ impl Args {
                 Err(err) => match err {
                     // ... because test was skipped
                     ExecutionError::Skipped(idx) => {
-                        count_skipped += 1;
-                        outcomes.extend(testcases.iter().map(|testcase| Outcome {
-                            location: Some(test.path.display().to_string()),
-                            testcase: (*testcase).clone(),
-                            output: ("", "", None).into(),
-                            escaping: escaping.clone(),
-                            format: test.parser_type,
-                            result: Err(TestCaseError::Skipped),
-                        }));
-                        pw.println(format!(
+                        run.count_skipped += 1;
+                        run.outcomes
+                            .extend(testcases.iter().map(|testcase| Outcome {
+                                location: Some(test.path.display().to_string()),
+                                testcase: (*testcase).clone(),
+                                output: ("", "", None).into(),
+                                escaping: escaping.clone(),
+                                format: test.parser_type,
+                                result: Err(TestCaseError::Skipped),
+                            }));
+                        run.messages.push(format!(
                             "⏩ {}: skipped, because testcase #{} ended in exit code {}",
                             style(test.path.to_string_lossy()).blue(),
                             idx + 1,
@@ -292,7 +310,7 @@ impl Args {
                                 .config
                                 .get_skip_document_code())
                         ));
-                        continue;
+                        return Ok(run);
                     }
 
                     // ... because test timed out
@@ -300,13 +318,10 @@ impl Args {
                         handle_early_termination(
                             &outputs,
                             &testcases,
-                            &mut outcomes,
+                            &mut run,
                             test.path.display().to_string(),
                             escaping.clone(),
                             test.parser_type,
-                            &mut count_success,
-                            &mut count_failed,
-                            &mut count_skipped,
                             |output, testcase| {
                                 if matches!(output.exit_code, ExitStatus::Timeout(_)) {
                                     Err(TestCaseError::Timeout)
@@ -325,7 +340,7 @@ impl Args {
                                 ("per-document timeout".to_string(), config.total_timeout)
                             }
                         };
-                        pw.println(format!(
+                        run.messages.push(format!(
                             "⌛️ {}: execution timed out after {} at {}",
                             style(test.path.to_string_lossy()).red(),
                             timeout.map_or_else(
@@ -334,7 +349,7 @@ impl Args {
                             ),
                             location,
                         ));
-                        continue;
+                        return Ok(run);
                     }
 
                     // ... because test failed with fail_fast enabled
@@ -342,22 +357,19 @@ impl Args {
                         handle_early_termination(
                             &outputs,
                             &testcases,
-                            &mut outcomes,
+                            &mut run,
                             test.path.display().to_string(),
                             escaping.clone(),
                             test.parser_type,
-                            &mut count_success,
-                            &mut count_failed,
-                            &mut count_skipped,
                             |output, testcase| testcase.validate(output),
                         );
 
-                        pw.println(format!(
+                        run.messages.push(format!(
                             "⚡ {}: stopped at testcase #{} due to fail_fast",
                             style(test.path.to_string_lossy()).red(),
                             idx + 1,
                         ));
-                        continue;
+                        return Ok(run);
                     }
 
                     // ... because interactive test failed
@@ -366,21 +378,18 @@ impl Args {
                         handle_early_termination(
                             &outputs,
                             &testcases,
-                            &mut outcomes,
+                            &mut run,
                             test.path.display().to_string(),
                             escaping.clone(),
                             test.parser_type,
-                            &mut count_success,
-                            &mut count_failed,
-                            &mut count_skipped,
                             |output, testcase| testcase.validate(output),
                         );
 
                         // the failed interactive testcase itself
                         match error {
                             InteractiveError::DirectivesFailed(diff) => {
-                                count_failed += 1;
-                                outcomes.push(Outcome {
+                                run.count_failed += 1;
+                                run.outcomes.push(Outcome {
                                     location: Some(test.path.display().to_string()),
                                     testcase: testcases[index].clone(),
                                     output: ("", "", None).into(),
@@ -392,8 +401,8 @@ impl Args {
                                 });
                             }
                             InteractiveError::Internal(msg) => {
-                                count_failed += 1;
-                                outcomes.push(Outcome {
+                                run.count_failed += 1;
+                                run.outcomes.push(Outcome {
                                     location: Some(test.path.display().to_string()),
                                     testcase: testcases[index].clone(),
                                     output: ("", "", None).into(),
@@ -409,25 +418,26 @@ impl Args {
                         // mark remaining testcases as skipped
                         let remaining = testcases.len() - (outputs.len() + 1);
                         if remaining > 0 {
-                            outcomes.extend(testcases.iter().skip(outputs.len() + 1).map(
-                                |testcase| Outcome {
-                                    location: Some(test.path.display().to_string()),
-                                    testcase: (*testcase).clone(),
-                                    output: ("", "", None).into(),
-                                    escaping: escaping.clone(),
-                                    format: test.parser_type,
-                                    result: Err(TestCaseError::Skipped),
-                                },
-                            ));
-                            count_skipped += remaining;
+                            run.outcomes
+                                .extend(testcases.iter().skip(outputs.len() + 1).map(|testcase| {
+                                    Outcome {
+                                        location: Some(test.path.display().to_string()),
+                                        testcase: (*testcase).clone(),
+                                        output: ("", "", None).into(),
+                                        escaping: escaping.clone(),
+                                        format: test.parser_type,
+                                        result: Err(TestCaseError::Skipped),
+                                    }
+                                }));
+                            run.count_skipped += remaining;
                         }
 
-                        pw.println(format!(
+                        run.messages.push(format!(
                             "❌ {}: interactive test #{} failed",
                             style(test.path.to_string_lossy()).red(),
                             index + 1,
                         ));
-                        continue;
+                        return Ok(run);
                     }
                     _ => bail!("failing in {:?}: {}", test.path, err),
                 },
@@ -443,9 +453,9 @@ impl Args {
                     let (mut failed, mut success) = (0, 0);
                     for (testcase, output) in testcases.into_iter().zip(outputs) {
                         if output.exit_code == ExitStatus::Detached {
-                            count_detached += 1;
+                            run.count_detached += 1;
                             if let Some(ref detached_process) = output.detached_process {
-                                kill_detached_process(&pw, detached_process)?;
+                                kill_detached_process(&mut run.messages, detached_process)?;
                             }
                             continue;
                         }
@@ -456,7 +466,7 @@ impl Args {
                         } else {
                             success += 1;
                         }
-                        outcomes.push(Outcome {
+                        run.outcomes.push(Outcome {
                             location: Some(test.path.display().to_string()),
                             testcase: testcase.clone(),
                             output,
@@ -465,12 +475,12 @@ impl Args {
                             result,
                         });
                     }
-                    count_failed += failed;
-                    count_success += success;
+                    run.count_failed += failed;
+                    run.count_success += success;
                     let total = failed + success;
 
                     if failed > 0 {
-                        pw.println(format!(
+                        run.messages.push(format!(
                             "❌ {}: failed {} out of {} testcase{}",
                             style(test.path.to_string_lossy()).red(),
                             style(failed).red().bold(),
@@ -478,7 +488,7 @@ impl Args {
                             if total == 1 { "" } else { "s" },
                         ));
                     } else if self.verbose {
-                        pw.println(format!(
+                        run.messages.push(format!(
                             "✅ {}: passed {} testcase{}",
                             style(test.path.to_string_lossy()).green(),
                             style(success).green().bold(),
@@ -487,7 +497,20 @@ impl Args {
                     }
                 }
             }
-        }
+            Ok(run)
+        };
+
+        run_in_parallel(tests, self.jobs.get(), run_document, |run| {
+            for message in run.messages {
+                pw.println(message);
+            }
+            outcomes.extend(run.outcomes);
+            count_success += run.count_success;
+            count_skipped += run.count_skipped;
+            count_failed += run.count_failed;
+            count_detached += run.count_detached;
+            Ok(())
+        })?;
         pw.println("");
         pw.finish_and_clear();
 
@@ -552,33 +575,43 @@ impl Args {
     }
 }
 
+/// The outcomes of the test cases of one document, and how many of them
+/// succeeded, were skipped, failed or detached
+#[derive(Default)]
+struct DocumentRun {
+    outcomes: Vec<Outcome>,
+    /// Status lines, printed when the run is applied, in document order
+    messages: Vec<String>,
+    count_success: usize,
+    count_skipped: usize,
+    count_failed: usize,
+    count_detached: usize,
+}
+
 /// Helper function to handle early termination cases (timeout, fail_fast).
 /// Validates outputs that were collected, marks remaining tests as skipped.
 fn handle_early_termination<F>(
     outputs: &[scrut::output::Output],
     testcases: &[&TestCase],
-    outcomes: &mut Vec<Outcome>,
+    run: &mut DocumentRun,
     location: String,
     escaping: scrut::escaping::Escaper,
     format: ParserType,
-    count_success: &mut usize,
-    count_failed: &mut usize,
-    count_skipped: &mut usize,
     mut validate_output: F,
 ) where
     F: FnMut(&scrut::output::Output, &TestCase) -> Result<(), TestCaseError>,
 {
     // append outcomes for each testcase that was executed
-    outcomes.extend(
+    run.outcomes.extend(
         outputs
             .iter()
             .zip(testcases.iter())
             .map(|(output, testcase)| {
                 let result = validate_output(output, testcase);
                 if result.is_err() {
-                    *count_failed += 1;
+                    run.count_failed += 1;
                 } else {
-                    *count_success += 1;
+                    run.count_success += 1;
                 }
                 Outcome {
                     location: Some(location.clone()),
@@ -594,7 +627,7 @@ fn handle_early_termination<F>(
     // append outcomes for testcases not executed
     let missing = testcases.len() - outputs.len();
     if missing > 0 {
-        outcomes.extend(
+        run.outcomes.extend(
             testcases
                 .iter()
                 .skip(outputs.len())
@@ -607,7 +640,7 @@ fn handle_early_termination<F>(
                     result: Err(TestCaseError::Skipped),
                 }),
         );
-        *count_skipped += missing;
+        run.count_skipped += missing;
     }
 }
 

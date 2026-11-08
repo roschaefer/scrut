@@ -26,6 +26,7 @@ use tracing::trace;
 use super::DEFAULT_SHELL;
 use super::context::Context as ExecutionContext;
 use super::runner::Runner;
+use super::util::start_one_at_a_time;
 use crate::output::DetachedProcess;
 use crate::output::ExitStatus as OutputExitStatus;
 use crate::output::Output;
@@ -87,7 +88,8 @@ impl Runner for SubprocessRunner {
         }
 
         let started = Instant::now();
-        let mut process = exec.detached().start().context("start process")?;
+        let mut process =
+            start_one_at_a_time(|| exec.detached().start()).context("start process")?;
         let span = debug_span!("process", pid = ?process.pid());
         let _s = span.enter();
         trace!(testcase = %&testcase, "running testcase in subprocess");
