@@ -1,0 +1,6 @@
+# Plain testcase
+
+```scrut
+$ echo new
+old
+```

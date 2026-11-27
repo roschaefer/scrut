@@ -1,0 +1,15 @@
+# Failing testcases in validation modes
+
+```scrut {mode: jsonschema}
+$ echo '{"name": 1}'
+---
+type: object
+properties:
+  name:
+    type: string
+```
+
+```scrut {mode: interactive, timeout: 1s}
+$ echo "Hello Alice"
+WAIT: Goodbye Alice
+```

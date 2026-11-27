@@ -97,6 +97,7 @@ Check out `scrut update --help` for additional parameters.
 
 There are limits to what `scrut update` can do:
 - Only `equal` and `escaped` expectations can be updated, but `glob` and `regex` would be replaced with either `equal` or `escaped`, whichever fits.
+- Test cases in `jsonschema` or `interactive` [mode](/docs/reference/fundamentals/inline-configuration/#mode) are left as written. If they fail, a warning is printed and they must be fixed by hand.
 - Quantifiers (`*`, `+`, `?`) will not be considered: If an output expectation uses quantifiers and became invalid, then `scrut update` would write individual output expectations instead of one "quantified" expectation.
 - Prepended and appended test documents are not updated (but you can update them individually)
 
