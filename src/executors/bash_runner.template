@@ -63,6 +63,9 @@ function __scrut_persist_state {
 shopt -s expand_aliases
 [ -f "$__SCRUT_TEMP_STATE_PATH/state" ] && source "$__SCRUT_TEMP_STATE_PATH/state"
 
+# re-apply environment configuration of this test case that the state overrode
+{restore_environment}
+
 # ensure the state of this execution will be persisted for the next execution
 [ {persist_state} -eq 1 ] && trap __scrut_persist_state EXIT
 
