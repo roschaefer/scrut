@@ -182,6 +182,7 @@ mod tests {
 
     use super::MarkdownTestCaseGenerator;
     use super::MarkdownUpdateGenerator;
+    use crate::config::OutputStreamControl;
     use crate::config::TestCaseConfig;
     use crate::config::TestCaseWait;
     use crate::diff::Diff;
@@ -343,7 +344,7 @@ mod tests {
                             title: "This is a test".to_string(),
                             shell_expression: "the command".to_string(),
                             body: ValidationBody::Output(OutputBody {
-                                expectations: vec![test_expectation!("equal", "same output")],
+                                expectations: vec![test_expectation!("same output")],
                             }),
                             exit_code: None,
                             line_number: 234,
@@ -412,11 +413,92 @@ mod tests {
                             title: "This is a test".to_string(),
                             shell_expression: "the command".to_string(),
                             body: ValidationBody::Output(OutputBody {
-                                expectations: vec![test_expectation!("equal", "same output")],
+                                expectations: vec![test_expectation!("same output")],
                             }),
                             exit_code: None,
                             line_number: 234,
                             ..Default::default()
+                        },
+                        result: Err(TestCaseError::InvalidExitCode {
+                            actual: 20,
+                            expected: 10,
+                        }),
+                        escaping: Escaper::default(),
+                        format: ParserType::Markdown,
+                    }],
+                },
+            ),
+            (
+                "updated_output_changed_exit_code_keeps_matching_glob",
+                UpdateGeneratorTest {
+                    original_document: &([
+                        "This is a test",
+                        "",
+                        "```scrut",
+                        "$ the command",
+                        "* (glob)",
+                        "old output",
+                        "[10]",
+                        "```",
+                    ]
+                    .join("\n")
+                        + "\n"),
+
+                    outcomes: vec![Outcome {
+                        location: None,
+                        output: ("1793394638\nnew output\n", "", Some(20)).into(),
+                        testcase: TestCase {
+                            title: "This is a test".to_string(),
+                            shell_expression: "the command".to_string(),
+                            body: ValidationBody::Output(OutputBody {
+                                expectations: vec![
+                                    test_expectation!("glob", "*"),
+                                    test_expectation!("old output"),
+                                ],
+                            }),
+                            exit_code: Some(10),
+                            line_number: 234,
+                            ..Default::default()
+                        },
+                        result: Err(TestCaseError::InvalidExitCode {
+                            actual: 20,
+                            expected: 10,
+                        }),
+                        escaping: Escaper::default(),
+                        format: ParserType::Markdown,
+                    }],
+                },
+            ),
+            (
+                "updated_output_changed_exit_code_validates_stderr",
+                UpdateGeneratorTest {
+                    original_document: &([
+                        "This is a test",
+                        "",
+                        "```scrut {output_stream: stderr}",
+                        "$ the command",
+                        "to stderr",
+                        "[10]",
+                        "```",
+                    ]
+                    .join("\n")
+                        + "\n"),
+
+                    outcomes: vec![Outcome {
+                        location: None,
+                        output: ("to stdout\n", "to stderr\n", Some(20)).into(),
+                        testcase: TestCase {
+                            title: "This is a test".to_string(),
+                            shell_expression: "the command".to_string(),
+                            body: ValidationBody::Output(OutputBody {
+                                expectations: vec![test_expectation!("to stderr")],
+                            }),
+                            exit_code: Some(10),
+                            line_number: 234,
+                            config: TestCaseConfig {
+                                output_stream: Some(OutputStreamControl::Stderr),
+                                ..Default::default()
+                            },
                         },
                         result: Err(TestCaseError::InvalidExitCode {
                             actual: 20,

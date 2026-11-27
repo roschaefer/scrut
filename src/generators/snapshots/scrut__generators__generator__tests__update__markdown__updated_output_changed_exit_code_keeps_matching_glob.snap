@@ -1,0 +1,12 @@
+---
+source: src/generators/generator.rs
+expression: result
+---
+This is a test
+
+```scrut
+$ the command
+* (glob)
+new output
+[20]
+```
