@@ -78,6 +78,12 @@ impl TestCase {
             }
         }
 
+        self.validate_output(output)
+    }
+
+    /// Validate that the output of an execution matches with the assumed
+    /// output, regardless of the exit code, or return an [`TestCaseError`]
+    pub fn validate_output(&self, output: &Output) -> Result<()> {
         // If the executor pre-computed a validation outcome (e.g. interactive
         // mode), it takes precedence over re-validating the body.
         if let Some(ref failure) = output.validation_result {
