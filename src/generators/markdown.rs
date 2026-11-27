@@ -9,6 +9,7 @@ use std::fmt::Write;
 
 use anyhow::Context;
 use anyhow::Result;
+use tracing::warn;
 
 use super::generator::TestCaseGenerator;
 use super::generator::UpdateGenerator;
@@ -21,6 +22,7 @@ use crate::parsers::markdown::DEFAULT_MARKDOWN_LANGUAGES;
 use crate::parsers::markdown::MarkdownIterator;
 use crate::parsers::markdown::MarkdownToken;
 use crate::parsers::markdown::NumberedLines;
+use crate::validation::ValidationBody;
 
 /// Update [`crate::testcase::TestCase`]s in an existing Markdown document
 pub struct MarkdownUpdateGenerator(Vec<String>);
@@ -77,14 +79,48 @@ impl UpdateGenerator for MarkdownUpdateGenerator {
                     language,
                     config_lines,
                     comment_lines,
-                    code_lines: _,
+                    code_lines,
                 } => {
                     let config = if config_lines.is_empty() {
                         "".into()
                     } else {
                         format!(" {{{}}}", config_lines.join_newline().trim_start())
                     };
-                    let generated = outcomes[testcase_index]
+                    let outcome = outcomes[testcase_index];
+
+                    // Only output expectations can be generated from an outcome. The body of
+                    // other validation modes (e.g. a JSON schema or interactive directives) is
+                    // kept as written.
+                    let mode = match outcome.testcase.body {
+                        ValidationBody::Output(_) => None,
+                        ValidationBody::JsonSchema(_) => Some("jsonschema"),
+                        ValidationBody::Interactive(_) => Some("interactive"),
+                    };
+                    if let Some(mode) = mode {
+                        if outcome.result.is_err() {
+                            warn!(
+                                "testcase number {} (line {}) failed, but testcases in `{}` mode cannot be updated: it is left unchanged",
+                                testcase_index + 1,
+                                outcome.testcase.line_number,
+                                mode,
+                            );
+                        }
+                        let original = code_lines
+                            .iter()
+                            .map(|(_, line)| line.assure_newline())
+                            .collect::<String>();
+                        let backticks = "`".repeat(max_backtick_size(&original) + 1);
+                        updated.push_str(&formatln!("{}{}{}", &backticks, &language, &config));
+                        for (_, line) in &comment_lines {
+                            updated.push_str(&line.assure_newline());
+                        }
+                        updated.push_str(&original);
+                        updated.push_str(&backticks.assure_newline());
+                        testcase_index += 1;
+                        continue;
+                    }
+
+                    let generated = outcome
                         .generate_testcase()
                         .with_context(|| format!("testcase number {}", testcase_index + 1))?;
                     let backticks = "`".repeat(max_backtick_size(&generated) + 1);
@@ -188,6 +224,7 @@ mod tests {
     use crate::diff::DiffLine;
     use crate::escaping::Escaper;
     use crate::formatln;
+    use crate::generators::generator::UpdateGenerator;
     use crate::generators::generator::tests::UpdateGeneratorTest;
     use crate::generators::generator::tests::run_update_generator_tests;
     use crate::generators::generator::tests::standard_testcase_generator_test_suite;
@@ -196,9 +233,58 @@ mod tests {
     use crate::test_expectation;
     use crate::testcase::TestCase;
     use crate::testcase::TestCaseError;
+    use crate::validation::JsonSchemaBody;
+    use crate::validation::JsonSchemaFailure;
+    use crate::validation::JsonSchemaFailureKind;
     use crate::validation::OutputBody;
     use crate::validation::ValidationBody;
     use crate::validation::ValidationFailure;
+
+    #[test]
+    fn test_update_generator_keeps_failing_json_schema_testcase_as_written() {
+        let original_document = [
+            "This is a test",
+            "",
+            "```scrut {mode: jsonschema}",
+            "# a comment",
+            "$ the command",
+            "---",
+            "type: object",
+            "```",
+        ]
+        .join("\n")
+            + "\n";
+        let outcome = Outcome {
+            location: None,
+            output: ("[]\n", "", Some(0)).into(),
+            testcase: TestCase {
+                title: "This is a test".to_string(),
+                shell_expression: "the command".to_string(),
+                body: ValidationBody::JsonSchema(JsonSchemaBody {
+                    schema_source: "type: object".to_string(),
+                }),
+                exit_code: None,
+                line_number: 5,
+                ..Default::default()
+            },
+            result: Err(TestCaseError::ValidationFailed(
+                ValidationFailure::JsonSchemaFailed(JsonSchemaFailure {
+                    kind: JsonSchemaFailureKind::ValidationErrors,
+                    errors: vec!["[] is not of type \"object\"".to_string()],
+                    output: "[]\n".to_string(),
+                    schema_source: "type: object".to_string(),
+                }),
+            )),
+            escaping: Escaper::default(),
+            format: ParserType::Markdown,
+        };
+
+        let updated = MarkdownUpdateGenerator::default()
+            .generate_update(&original_document, &[&outcome])
+            .expect("generate update without error");
+
+        assert_eq!(original_document, updated);
+    }
 
     #[test]
     fn test_update_generator() {

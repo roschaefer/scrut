@@ -1,0 +1,21 @@
+# Passing testcases in validation modes
+
+```scrut {mode: jsonschema}
+$ echo '{"name": "scrut"}'
+---
+type: object
+required:
+  - name
+```
+
+```scrut {mode: interactive}
+$ bash -c 'read -p "Name: " name && echo "Hello $name"'
+WAIT: Name:
+WRITE: Alice
+WAIT: Hello Alice
+```
+
+```scrut
+$ echo new
+old
+```
