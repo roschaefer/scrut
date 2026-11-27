@@ -101,21 +101,21 @@ impl Runner for BashRunner {
     fn run(&self, name: &str, testcase: &TestCase, context: &ExecutionContext) -> Result<Output> {
         let shell = self.shell.to_owned();
 
+        let is_detached = testcase.config.detached.unwrap_or(false);
+        let restore_environment = self.restore_environment(&testcase.config.environment)?;
+        if !is_detached {
+            self.persist_configured_environment(&testcase.config.environment)?;
+        }
+
         // render the bash script
         let state_directory_str = self.state_directory.to_string_lossy();
         let expression = BASH_TEMPLATE
             .replace("{state_directory}", &state_directory_str)
             .replace("{name}", name)
+            .replace("{restore_environment}", &restore_environment)
             .replace("{shell_expression}", &testcase.shell_expression)
             .replace("{excluded_variables}", &BASH_EXCLUDED_VARIABLES.join("|"))
-            .replace(
-                "{persist_state}",
-                if testcase.config.detached.unwrap_or(false) {
-                    "0"
-                } else {
-                    "1"
-                },
-            );
+            .replace("{persist_state}", if is_detached { "0" } else { "1" });
         trace!("compiled expression {}", &expression);
 
         let mut testcase = testcase.clone();
@@ -131,6 +131,62 @@ impl Runner for BashRunner {
 
         Ok(output)
     }
+}
+
+/// File in the state directory that holds the `environment` configuration of
+/// the previous (non-detached) testcase.
+const CONFIGURED_ENVIRONMENT_FILE: &str = "configured_env";
+
+impl BashRunner {
+    /// Renders `export` statements for the configured environment variables
+    /// that differ from those of the previous testcase.
+    ///
+    /// The state of the previous testcase is sourced after the process
+    /// environment is set up, so without these statements the inherited values
+    /// would replace the ones configured for this testcase. Variables whose
+    /// configured value did not change (e.g. those provided by Scrut, or
+    /// document defaults) are left alone, so that values a previous testcase
+    /// assigned to them are still inherited.
+    fn restore_environment(&self, environment: &BTreeMap<String, String>) -> Result<String> {
+        let path = self.state_directory.join(CONFIGURED_ENVIRONMENT_FILE);
+        let previous = if path.exists() {
+            parse_env_file(&path)?
+        } else {
+            BTreeMap::new()
+        };
+        Ok(environment
+            .iter()
+            .filter(|(key, value)| is_shell_identifier(key) && previous.get(*key) != Some(value))
+            .map(|(key, value)| format!("export {key}={}\n", shell_quote(value)))
+            .collect())
+    }
+
+    fn persist_configured_environment(&self, environment: &BTreeMap<String, String>) -> Result<()> {
+        let content = environment
+            .iter()
+            .flat_map(|(key, value)| [key.as_bytes(), b"=", value.as_bytes(), b"\0"])
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        fs::create_dir_all(&self.state_directory)?;
+        fs::write(
+            self.state_directory.join(CONFIGURED_ENVIRONMENT_FILE),
+            content,
+        )?;
+        Ok(())
+    }
+}
+
+fn is_shell_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Parse an env file (null-delimited KEY=VALUE entries) into a BTreeMap
@@ -281,6 +337,60 @@ mod tests {
             Some(&"hello_world".to_string()),
             "exported variable is captured in env"
         );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_configured_environment_overrides_value_inherited_from_previous_testcase() {
+        let temp_dir = TempDir::with_prefix("runner.").expect("create temporary directory");
+        let runner = BashRunner {
+            shell: DEFAULT_SHELL.to_owned(),
+            state_directory: temp_dir.path().into(),
+        };
+        let context = ExecutionContext::new_for_test();
+
+        let mut first = TestCase::from_expression("export SCRUT_TEST_VAR=inherited");
+        first.config.environment = [("SCRUT_TEST_VAR".into(), "first".into())].into();
+        runner
+            .run("first", &first, &context)
+            .expect("execute without error");
+
+        let mut second = TestCase::from_expression("echo \"$SCRUT_TEST_VAR\"");
+        second.config.environment = [("SCRUT_TEST_VAR".into(), "second".into())].into();
+        let output = runner
+            .run("second", &second, &context)
+            .expect("execute without error");
+
+        let expect: Output = ("second\n", "").into();
+        assert_eq!(expect, output);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_unchanged_configured_environment_keeps_value_inherited_from_previous_testcase() {
+        let temp_dir = TempDir::with_prefix("runner.").expect("create temporary directory");
+        let runner = BashRunner {
+            shell: DEFAULT_SHELL.to_owned(),
+            state_directory: temp_dir.path().into(),
+        };
+        let context = ExecutionContext::new_for_test();
+        let environment: std::collections::BTreeMap<String, String> =
+            [("SCRUT_TEST_VAR".into(), "configured".into())].into();
+
+        let mut first = TestCase::from_expression("export SCRUT_TEST_VAR=inherited");
+        first.config.environment = environment.clone();
+        runner
+            .run("first", &first, &context)
+            .expect("execute without error");
+
+        let mut second = TestCase::from_expression("echo \"$SCRUT_TEST_VAR\"");
+        second.config.environment = environment;
+        let output = runner
+            .run("second", &second, &context)
+            .expect("execute without error");
+
+        let expect: Output = ("inherited\n", "").into();
+        assert_eq!(expect, output);
     }
 
     #[test]

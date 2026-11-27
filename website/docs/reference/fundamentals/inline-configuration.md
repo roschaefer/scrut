@@ -253,7 +253,7 @@ In this example, if `critical-setup-command` fails, all subsequent tests in the 
 - Command Line Parameter: **n/a**
 - Default: **`{}`**
 
-This configuration allows you to set environment variables for the test case. The environment variables are specified as key-value pairs in an object. These variables are set in the environment where the test case is executed.
+This configuration allows you to set environment variables for the test case. The environment variables are specified as key-value pairs in an object. These variables are set in the environment where the test case is executed. They take precedence over values of the same variables inherited from previous test cases in the document (see [Execution Model](/docs/reference/behavior/execution-model/)), unless the configured value is the same as in the previous test case.
 
 **Example:**
 
