@@ -13,7 +13,7 @@ As an example consider that `jq` comes with a long list of parameters. There are
 
 Using these make test output more stable and predictable. Let's say there are many test documents with many test cases that want those parameters set:
 
-````markdown title="tests/boostrapped.md" showLineNumbers
+````markdown title="tests/bootstrapped.md" showLineNumbers
 # Validate many closely related things
 
 ## Validate a thing
@@ -40,7 +40,7 @@ While having to repeat `-r -M -S` for each test is not a big problem, in real-li
 
 Mind that *shell expressions* are just that: arbitrary expressions that are interpreted and executed by a `bash` process. If a long expression would be repeatedly used manually on the command line it would not take long until someone is fed up and creates an `alias`. This is exactly what you should do in a Scrut test document:
 
-````markdown title="boostrapped.md" showLineNumbers {3-7}
+````markdown title="bootstrapped.md" showLineNumbers {3-7}
 # Validate many closely related things
 
 Setup
@@ -105,7 +105,7 @@ alias jq_run='jq -r -M -S'
 
 Now all you need to do is included that `setup.sh` file in your test document. You would do it in the same way as you would in `bash`, that is using `source` to execute and load it into the current shell process:
 
-````markdown  title="boostrapped.md" showLineNumbers {6}
+````markdown  title="bootstrapped.md" showLineNumbers {6}
 # Validate many closely related things
 
 Setup
@@ -151,7 +151,7 @@ Here is how you can prepend all test cases in the above document (there could be
 ````markdown title="tests/bootstrapped.md"
 ---
 prepend:
-    - tests/setup.md
+    - setup.md
 ---
 
 # Validate many closely related things
@@ -195,8 +195,14 @@ The difference to configuration options is that parameters are applied to *all* 
 Here is how that looks in practice:
 
 ```bash
-$ scrut test -P tests/setup.md tests/boostrapped.md
+$ scrut test tests/bootstrapped.md -P tests/setup.md
 ```
+
+:::note
+
+`-P` and `-A` take every value that follows them, so pass the test documents first, or separate them with `--` (`scrut test -P tests/setup.md -- tests/bootstrapped.md`). Otherwise the test documents are treated as additional prepend/append paths and no test is executed.
+
+:::
 
 :::warning
 

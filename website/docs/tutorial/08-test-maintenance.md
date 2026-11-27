@@ -98,6 +98,6 @@ Check out `scrut update --help` for additional parameters.
 There are limits to what `scrut update` can do:
 - Only `equal` and `escaped` expectations can be updated, but `glob` and `regex` would be replaced with either `equal` or `escaped`, whichever fits.
 - Quantifiers (`*`, `+`, `?`) will not be considered: If an output expectation uses quantifiers and became invalid, then `scrut update` would write individual output expectations instead of one "quantified" expectation.
-- Prepended and appended test documents are not updated (but you can update them individually)
+- Test documents that use `prepend` or `append` are skipped entirely, so their own test cases are not updated either. Prepended and appended test documents can be updated individually.
 
 :::
